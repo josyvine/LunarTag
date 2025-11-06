@@ -7,6 +7,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
 import android.util.Log;
 import android.widget.Toast;
@@ -14,8 +15,10 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 
+import com.google.android.gms.tasks.OnCompleteListener;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.DocumentReference;
@@ -35,12 +38,8 @@ import java.io.PrintWriter;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
-import java.net.UnknownHostException;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
@@ -149,6 +148,8 @@ public class SenderService extends Service {
         dropRequest.put("senderPublicPort", stunResult.publicPort);
         dropRequest.put("senderLocalPort", server.getListeningPort());
         dropRequest.put("timestamp", System.currentTimeMillis());
+        // Receiver ID is initially null
+        dropRequest.put("receiverId", null);
 
         db.collection("drop_requests")
                 .add(dropRequest)
@@ -197,7 +198,7 @@ public class SenderService extends Service {
                         stopServiceAndCleanup("An error occurred on the receiver's end.");
                     }
                 } else {
-                    Log.d(TAG, "Drop request document deleted.");
+                    Log.d(TAG, "Drop request document deleted by receiver.");
                     stopServiceAndCleanup(null);
                 }
             }
@@ -217,7 +218,6 @@ public class SenderService extends Service {
 
     private void stopServiceAndCleanup(final String toastMessage) {
         if (toastMessage != null) {
-            // This is a simple way to show toast from a background service
             new Handler(getMainLooper()).post(new Runnable() {
                 @Override
                 public void run() {
@@ -241,15 +241,27 @@ public class SenderService extends Service {
         if (cloakedFile != null && cloakedFile.exists()) {
             cloakedFile.delete();
         }
-        // If the request wasn't completed, mark it as failed so the receiver knows.
+        
+        // --- THIS IS THE UPDATE ---
+        // Client-side cleanup: Attempt to delete the Firestore document.
         if (dropRequestId != null) {
-            db.collection("drop_requests").document(dropRequestId).get().addOnSuccessListener(new OnSuccessListener<DocumentSnapshot>() {
+            db.collection("drop_requests").document(dropRequestId).get().addOnCompleteListener(new OnCompleteListener<DocumentSnapshot>() {
                 @Override
-                public void onSuccess(DocumentSnapshot documentSnapshot) {
-                    if (documentSnapshot.exists()) {
-                        String status = documentSnapshot.getString("status");
-                        if ("pending".equals(status) || "accepted".equals(status)) {
-                            documentSnapshot.getReference().update("status", "error");
+                public void onComplete(@NonNull Task<DocumentSnapshot> task) {
+                    if (task.isSuccessful()) {
+                        DocumentSnapshot document = task.getResult();
+                        if (document.exists()) {
+                            String status = document.getString("status");
+                            // Don't delete if receiver marked it complete, as they will delete it.
+                            if (!"complete".equals(status)) {
+                                document.getReference().delete()
+                                        .addOnSuccessListener(new OnSuccessListener<Void>() {
+                                            @Override
+                                            public void onSuccess(Void aVoid) {
+                                                Log.d(TAG, "Drop request document successfully deleted.");
+                                            }
+                                        });
+                            }
                         }
                     }
                 }
@@ -289,9 +301,6 @@ public class SenderService extends Service {
         return null;
     }
 
-    /**
-     * A very simple, single-file, single-connection HTTP server.
-     */
     private static class NanoHttpd extends Thread {
         private final ServerSocket serverSocket;
         private final File fileToServe;
@@ -421,15 +430,11 @@ public class SenderService extends Service {
                 } catch (IOException e) {
                     // ignore
                 }
-                // Stop server after one successful-ish file transfer
                 stopServer();
             }
         }
     }
-
-    /**
-     * A simple STUN client to discover public IP and port.
-     */
+    
     private static class StunClient {
         private static final String STUN_SERVER = "stun.l.google.com";
         private static final int STUN_PORT = 19302;
@@ -445,20 +450,15 @@ public class SenderService extends Service {
                 socket = new DatagramSocket();
                 socket.setSoTimeout(3000); // 3-second timeout
 
-                // STUN Binding Request
                 byte[] request = new byte[20];
-                // Message Type: 0x0001 (Binding Request)
                 request[0] = 0x00;
                 request[1] = 0x01;
-                // Message Length: 0
                 request[2] = 0x00;
                 request[3] = 0x00;
-                // Magic Cookie: 0x2112A442
                 request[4] = 0x21;
                 request[5] = 0x12;
                 request[6] = (byte) 0xA4;
                 request[7] = 0x42;
-                // Transaction ID (12 bytes, can be random)
                 new Random().nextBytes(Arrays.copyOfRange(request, 8, 20));
 
                 InetAddress address = InetAddress.getByName(STUN_SERVER);
@@ -482,18 +482,16 @@ public class SenderService extends Service {
         }
 
         private static StunResult parseStunResponse(byte[] data, int length) {
-            if (length < 20 || data[0] != 0x01 || data[1] != 0x01) { // Binding Success Response
+            if (length < 20 || data[0] != 0x01 || data[1] != 0x01) { 
                 return null;
             }
 
-            // Find MAPPED-ADDRESS or XOR-MAPPED-ADDRESS attribute
-            int i = 20; // Start after header
+            int i = 20; 
             while (i < length) {
                 int type = ((data[i] & 0xFF) << 8) | (data[i + 1] & 0xFF);
                 int attrLength = ((data[i + 2] & 0xFF) << 8) | (data[i + 3] & 0xFF);
 
                 if (type == 0x0001 /* MAPPED-ADDRESS */ || type == 0x0020 /* XOR-MAPPED-ADDRESS */) {
-                    // Attribute value starts at i + 4
                     int family = data[i + 5] & 0xFF;
                     if (family == 0x01) { // IPv4
                         int port = ((data[i + 6] & 0xFF) << 8) | (data[i + 7] & 0xFF);
@@ -520,8 +518,8 @@ public class SenderService extends Service {
                         }
                     }
                 }
-                i += 4 + attrLength; // Move to next attribute
-                if (attrLength % 4 != 0) { // Attributes are padded to 4 bytes
+                i += 4 + attrLength; 
+                if (attrLength % 4 != 0) { 
                     i += (4 - (attrLength % 4));
                 }
             }
