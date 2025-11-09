@@ -69,7 +69,6 @@ public class SenderService extends Service {
     private String dropRequestId;
     private ListenerRegistration requestListener;
 
-    // --- THIS IS THE FIX: The missing arrays have been added here. ---
     private static final String[] ADJECTIVES = {"Red", "Blue", "Green", "Silent", "Fast", "Brave", "Ancient", "Wandering", "Golden", "Iron"};
     private static final String[] NOUNS = {"Tiger", "Lion", "Eagle", "Fox", "Wolf", "River", "Mountain", "Star", "Comet", "Shadow"};
 
@@ -91,7 +90,7 @@ public class SenderService extends Service {
 
             Notification notification = buildNotification("Starting Drop Send Service...", true);
             startForeground(NOTIFICATION_ID, notification);
-            
+
             Intent progressIntent = new Intent(this, DropProgressActivity.class);
             progressIntent.putExtra("is_sender", true);
             progressIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -186,7 +185,7 @@ public class SenderService extends Service {
                     }
                 });
     }
-    
+
     private void broadcastStatus(String major, String minor, int progress, int max, long bytes) {
         Intent intent = new Intent(DropProgressActivity.ACTION_UPDATE_STATUS);
         intent.putExtra(DropProgressActivity.EXTRA_STATUS_MAJOR, major);
@@ -196,21 +195,23 @@ public class SenderService extends Service {
         intent.putExtra(DropProgressActivity.EXTRA_BYTES_TRANSFERRED, bytes);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
-    
+
     private void broadcastComplete() {
         Intent intent = new Intent(DropProgressActivity.ACTION_TRANSFER_COMPLETE);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
 
     private void broadcastError(String message) {
-        Intent intent = new Intent(DropProgressActivity.ACTION_TRANSFER_ERROR);
-        Intent hfmdropErrorIntent = new Intent(DownloadService.ACTION_DOWNLOAD_ERROR);
-        hfmdropErrorIntent.putExtra(DownloadService.EXTRA_ERROR_MESSAGE, message);
-        LocalBroadcastManager.getInstance(this).sendBroadcast(hfmdropErrorIntent);
+        // --- THIS IS THE FIX ---
+        // Both activities now listen for the same error action and extra.
+        Intent errorIntent = new Intent(DownloadService.ACTION_DOWNLOAD_ERROR);
+        errorIntent.putExtra(DownloadService.EXTRA_ERROR_MESSAGE, message);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(errorIntent);
 
+        // Also notify the DropProgressActivity that an error occurred to update its UI state.
         LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(DropProgressActivity.ACTION_TRANSFER_ERROR));
     }
-    
+
     private String getStackTraceAsString(Exception e) {
         StringWriter sw = new StringWriter();
         PrintWriter pw = new PrintWriter(sw);
@@ -287,7 +288,7 @@ public class SenderService extends Service {
         if (cloakedFile != null && cloakedFile.exists()) {
             cloakedFile.delete();
         }
-        
+
         if (dropRequestId != null) {
             db.collection("drop_requests").document(dropRequestId).get().addOnCompleteListener(new OnCompleteListener<DocumentSnapshot>() {
                 @Override
@@ -401,7 +402,7 @@ public class SenderService extends Service {
 
                 String line = in.readLine();
                 if (line == null || !line.startsWith("GET")) {
-                    return; 
+                    return;
                 }
 
                 long rangeStart = 0;
@@ -462,7 +463,7 @@ public class SenderService extends Service {
                     bytesRemaining -= bytesRead;
                 }
                 out.flush();
-                
+
             } catch (IOException e) {
                 Log.e(TAG, "Error handling client request", e);
             } finally {
@@ -477,7 +478,7 @@ public class SenderService extends Service {
             }
         }
     }
-    
+
     private static class StunClient {
         private static final String STUN_SERVER = "stun.l.google.com";
         private static final int STUN_PORT = 19302;
@@ -525,11 +526,11 @@ public class SenderService extends Service {
         }
 
         private static StunResult parseStunResponse(byte[] data, int length) {
-            if (length < 20 || data[0] != 0x01 || data[1] != 0x01) { 
+            if (length < 20 || data[0] != 0x01 || data[1] != 0x01) {
                 return null;
             }
 
-            int i = 20; 
+            int i = 20;
             while (i < length) {
                 int type = ((data[i] & 0xFF) << 8) | (data[i + 1] & 0xFF);
                 int attrLength = ((data[i + 2] & 0xFF) << 8) | (data[i + 3] & 0xFF);
@@ -561,8 +562,8 @@ public class SenderService extends Service {
                         }
                     }
                 }
-                i += 4 + attrLength; 
-                if (attrLength % 4 != 0) { 
+                i += 4 + attrLength;
+                if (attrLength % 4 != 0) {
                     i += (4 - (attrLength % 4));
                 }
             }
