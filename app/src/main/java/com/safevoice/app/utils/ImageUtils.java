@@ -1,4 +1,4 @@
-package com.safevoice.app.utils;
+package com.safevoice.app.utils; 
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
